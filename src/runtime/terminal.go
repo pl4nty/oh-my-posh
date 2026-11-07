@@ -52,6 +52,10 @@ func (term *Terminal) Init(flags *Flags) {
 	term.lsDirMap = maps.NewConcurrent[[]fs.DirEntry]()
 
 	initCache := func(fileName string) *cache.File {
+		if InProcess {
+			return cache.Shared(filepath.Join(cache.Path(), fileName), term.CmdFlags.SaveCache)
+		}
+
 		fileCache := &cache.File{}
 		fileCache.Init(filepath.Join(cache.Path(), fileName), term.CmdFlags.SaveCache)
 		return fileCache
@@ -66,9 +70,23 @@ func (term *Terminal) Init(flags *Flags) {
 
 	term.setPwd()
 
+	if InProcess {
+		term.cmdCache = sharedCmdCache
+		return
+	}
+
 	term.cmdCache = &cache.Command{
 		Commands: maps.NewConcurrent[string](),
 	}
+}
+
+// InProcess is set by the in-process (c-shared) build, where the process outlives a single prompt.
+// Command lookups (misses included) and cache files then stay loaded between prompts,
+// and cache files are written in the background instead of on every prompt.
+var InProcess bool
+
+var sharedCmdCache = &cache.Command{
+	Commands: maps.NewConcurrent[string](),
 }
 
 func (term *Terminal) Getenv(key string) string {

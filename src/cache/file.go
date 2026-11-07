@@ -3,6 +3,7 @@ package cache
 import (
 	"encoding/json"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jandedobbeleer/oh-my-posh/src/log"
@@ -14,6 +15,45 @@ type File struct {
 	cacheFilePath string
 	dirty         bool
 	persist       bool
+
+	// shared files stay loaded between prompts and are written in the background
+	shared  bool
+	mu      sync.Mutex
+	pending []byte
+	writing bool
+}
+
+var (
+	sharedFiles   = map[string]*File{}
+	sharedFilesMu sync.Mutex
+)
+
+// Shared returns the cache file for cacheFilePath, loading it from disk only the first time.
+// It's for a process that renders many prompts, where reloading and rewriting the
+// file on every prompt would dominate the render time.
+func Shared(cacheFilePath string, persist bool) *File {
+	sharedFilesMu.Lock()
+	defer sharedFilesMu.Unlock()
+
+	fc, ok := sharedFiles[cacheFilePath]
+	if !ok {
+		fc = &File{shared: true}
+		fc.Init(cacheFilePath, persist)
+		sharedFiles[cacheFilePath] = fc
+		return fc
+	}
+
+	fc.persist = persist
+
+	// Init drops expired keys on load; a file that stays loaded has to do it here
+	for key, val := range fc.cache.ToSimple() {
+		if co, ok := val.(*Entry); ok && co.Expired() {
+			fc.cache.Delete(key)
+			fc.dirty = true
+		}
+	}
+
+	return fc
 }
 
 func (fc *File) Init(cacheFilePath string, persist bool) {
@@ -57,7 +97,41 @@ func (fc *File) Close() {
 
 	cache := fc.cache.ToSimple()
 
-	if dump, err := json.MarshalIndent(cache, "", "    "); err == nil {
+	dump, err := json.MarshalIndent(cache, "", "    ")
+	if err != nil {
+		return
+	}
+
+	if !fc.shared {
+		_ = os.WriteFile(fc.cacheFilePath, dump, 0o644)
+		return
+	}
+
+	// snapshot now, write later; only the latest snapshot gets written
+	fc.dirty = false
+	fc.mu.Lock()
+	fc.pending = dump
+	start := !fc.writing
+	fc.writing = true
+	fc.mu.Unlock()
+
+	if start {
+		go fc.flush()
+	}
+}
+
+func (fc *File) flush() {
+	for {
+		fc.mu.Lock()
+		dump := fc.pending
+		fc.pending = nil
+		if dump == nil {
+			fc.writing = false
+			fc.mu.Unlock()
+			return
+		}
+		fc.mu.Unlock()
+
 		_ = os.WriteFile(fc.cacheFilePath, dump, 0o644)
 	}
 }
