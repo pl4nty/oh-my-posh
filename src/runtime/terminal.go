@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	httplib "net/http"
@@ -52,6 +53,10 @@ func (term *Terminal) Init(flags *Flags) {
 	term.lsDirMap = maps.NewConcurrent[[]fs.DirEntry]()
 
 	initCache := func(fileName string) *cache.File {
+		if InProcess {
+			return cache.Shared(filepath.Join(cache.Path(), fileName), term.CmdFlags.SaveCache)
+		}
+
 		fileCache := &cache.File{}
 		fileCache.Init(filepath.Join(cache.Path(), fileName), term.CmdFlags.SaveCache)
 		return fileCache
@@ -66,9 +71,23 @@ func (term *Terminal) Init(flags *Flags) {
 
 	term.setPwd()
 
+	if InProcess {
+		term.cmdCache = sharedCmdCache
+		return
+	}
+
 	term.cmdCache = &cache.Command{
 		Commands: maps.NewConcurrent[string](),
 	}
+}
+
+// InProcess is set by the in-process (c-shared) build, where the process outlives a single prompt.
+// Command lookups (misses included) and cache files then stay loaded between prompts,
+// and cache files are written in the background instead of on every prompt.
+var InProcess bool
+
+var sharedCmdCache = &cache.Command{
+	Commands: maps.NewConcurrent[string](),
 }
 
 func (term *Terminal) Getenv(key string) string {
@@ -311,15 +330,46 @@ func (term *Terminal) CommandPath(command string) string {
 		return cmdPath
 	}
 
+	// In-process, also remember lookups across sessions in the device cache, keyed on PATH and PATHEXT:
+	// probing every PATH entry for every extension is most of a cold first prompt on Windows.
+	// A command installed into a PATH directory shows up within the hour, or in a session with a different PATH.
+	var persistentKey string
+	if InProcess {
+		persistentKey = commandPathCacheKey(command)
+		if cmdPath, ok := term.deviceCache.Get(persistentKey); ok {
+			term.cmdCache.Set(command, cmdPath)
+			return cmdPath
+		}
+	}
+
 	cmdPath, err := exec.LookPath(command)
 	if err == nil {
 		term.cmdCache.Set(command, cmdPath)
+		if InProcess {
+			term.deviceCache.Set(persistentKey, cmdPath, commandPathCacheDuration)
+		}
+
 		log.Debug(cmdPath)
 		return cmdPath
 	}
 
+	if InProcess {
+		term.cmdCache.Set(command, "")
+		term.deviceCache.Set(persistentKey, "", commandPathCacheDuration)
+	}
+
 	log.Error(err)
 	return ""
+}
+
+const commandPathCacheDuration = cache.Duration("1h")
+
+func commandPathCacheKey(command string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(os.Getenv("PATH")))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(os.Getenv("PATHEXT")))
+	return fmt.Sprintf("command_path_%s_%x", command, h.Sum64())
 }
 
 func (term *Terminal) HasCommand(command string) bool {
