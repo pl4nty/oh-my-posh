@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <!-- path to an installed pwsh, for the System.Management.Automation reference -->
+    <PwshHome Condition="'$(PwshHome)' == ''">$(ProgramFiles)\PowerShell\7</PwshHome>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Management.Automation">
+      <HintPath>$(PwshHome)\System.Management.Automation.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
